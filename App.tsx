@@ -8,38 +8,44 @@ import { PhysioLogin } from './components/PhysioLogin';
 import { Stethoscope, User, ShieldCheck } from 'lucide-react';
 import { generateDischargeReport } from './services/geminiService';
 
-const STORAGE_KEY_PREFIX = 'physio_temp_logs_';
-const REPORT_KEY_PREFIX = 'physio_temp_reports_';
+const STORAGE_KEY = 'physio_app_data_v1';
 
 const App: React.FC = () => {
   const [currentRole, setCurrentRole] = useState<UserRole>(UserRole.NONE);
   const [isRegistering, setIsRegistering] = useState(false);
   const [isPhysioLoggingIn, setIsPhysioLoggingIn] = useState(false);
   
-  // Use a list of patients for the Physio view
-  const [patientsList, setPatientsList] = useState<Patient[]>(MOCK_PATIENTS);
+  // -- UNIFIED PERSISTENT STATE --
+  // We load the full list of patients from storage once. 
+  // If empty, we seed it with MOCK_PATIENTS.
+  const [patientsList, setPatientsList] = useState<Patient[]>(() => {
+      try {
+          const saved = localStorage.getItem(STORAGE_KEY);
+          if (saved) {
+              return JSON.parse(saved);
+          }
+      } catch (e) {
+          console.error("Failed to load persistence:", e);
+      }
+      return MOCK_PATIENTS;
+  });
   
-  // The specific patient logged in (if Role == PATIENT)
-  const [currentPatient, setCurrentPatient] = useState<Patient>(MOCK_PATIENTS[0]);
+  // Sync back to storage on any change
+  useEffect(() => {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(patientsList));
+  }, [patientsList]);
+
+  // Current logged in user state
+  const [currentPatient, setCurrentPatient] = useState<Patient>(patientsList[0]);
   const [currentPhysio, setCurrentPhysio] = useState<{name: string, id: string} | undefined>(undefined);
 
-  // Load temporary logs and reports on startup
+  // Sync currentPatient with the list if the list updates (e.g., Log added)
   useEffect(() => {
-    // For demo purposes, we check storage for the first mock patient
-    const p1Id = MOCK_PATIENTS[0].id;
-    const storedLogs = sessionStorage.getItem(`${STORAGE_KEY_PREFIX}${p1Id}`);
-    const storedReports = sessionStorage.getItem(`${REPORT_KEY_PREFIX}${p1Id}`);
-    
-    let updatedP1 = { ...MOCK_PATIENTS[0] };
-    if (storedLogs) updatedP1.logs = JSON.parse(storedLogs);
-    if (storedReports) updatedP1.weeklyReports = JSON.parse(storedReports);
-
-    // Update the list and the current patient
-    const newPatients = [updatedP1, ...MOCK_PATIENTS.slice(1)];
-    setPatientsList(newPatients);
-    setCurrentPatient(updatedP1);
-
-  }, []);
+      const freshData = patientsList.find(p => p.id === currentPatient.id);
+      if (freshData && freshData !== currentPatient) {
+          setCurrentPatient(freshData);
+      }
+  }, [patientsList, currentPatient.id]);
 
   const reset = () => {
     setCurrentRole(UserRole.NONE);
@@ -49,17 +55,29 @@ const App: React.FC = () => {
   };
 
   const handleRegistration = (role: UserRole, details: any) => {
-    const updatedPatient = {
-        ...MOCK_PATIENTS[0], // Reset to base for new demo flow
-        name: details.name,
-        age: details.age,
-        email: details.email,
-        physioName: details.physioName,
-        logs: MOCK_PATIENTS[0].logs,
-        weeklyReports: MOCK_PATIENTS[0].weeklyReports
-    };
+    // 1. Check if this patient already exists (e.g. created by Physio via "New Case")
+    const existingPatient = patientsList.find(p => p.email.toLowerCase() === details.email.toLowerCase());
+
+    if (existingPatient) {
+        // Log in as existing
+        setCurrentPatient(existingPatient);
+    } else {
+        // Register new
+        const newPatient: Patient = {
+            ...MOCK_PATIENTS[0], // Base off mock template
+            id: `p${Date.now()}`,
+            name: details.name,
+            age: parseInt(details.age) || 25,
+            email: details.email,
+            physioName: details.physioName,
+            // Reset logs/reports for a truly new user
+            logs: [],
+            weeklyReports: []
+        };
+        setPatientsList(prev => [newPatient, ...prev]);
+        setCurrentPatient(newPatient);
+    }
     
-    setCurrentPatient(updatedPatient);
     setCurrentRole(role);
     setIsRegistering(false);
   };
@@ -70,28 +88,22 @@ const App: React.FC = () => {
       setIsPhysioLoggingIn(false);
   };
 
+  const updatePatientData = (updatedPatient: Patient) => {
+      setPatientsList(prev => prev.map(p => p.id === updatedPatient.id ? updatedPatient : p));
+  };
+
   const handleLogEntry = (log: DailyLog) => {
-    setCurrentPatient(prev => {
-        const newLogs = [...prev.logs, log];
-        sessionStorage.setItem(`${STORAGE_KEY_PREFIX}${prev.id}`, JSON.stringify(newLogs));
-        return { ...prev, logs: newLogs };
-    });
-    // Also update the list so if we switch to physio view immediately, it's there
-    setPatientsList(prev => prev.map(p => p.id === currentPatient.id ? { ...p, logs: [...p.logs, log] } : p));
+    // Create updated patient object
+    const updatedPatient = {
+        ...currentPatient,
+        logs: [...currentPatient.logs, log]
+    };
+    // Update global list (will sync back to currentPatient via useEffect)
+    updatePatientData(updatedPatient);
   };
 
   const handlePatientUpdate = (updatedPatient: Patient) => {
-      // Update the individual patient state
-      if (updatedPatient.id === currentPatient.id) {
-          setCurrentPatient(updatedPatient);
-      }
-      
-      // Update the list
-      setPatientsList(prev => prev.map(p => p.id === updatedPatient.id ? updatedPatient : p));
-
-      // Persist
-      sessionStorage.setItem(`${REPORT_KEY_PREFIX}${updatedPatient.id}`, JSON.stringify(updatedPatient.weeklyReports));
-      sessionStorage.setItem(`${STORAGE_KEY_PREFIX}${updatedPatient.id}`, JSON.stringify(updatedPatient.logs));
+      updatePatientData(updatedPatient);
   };
 
   const handleAddPatient = (newPatient: Patient) => {
@@ -103,10 +115,14 @@ const App: React.FC = () => {
       alert(`SYSTEM: Emailing discharge report to ${currentPatient.email}...\n\nSubject: Recovery Journey Complete\n\n${report.substring(0, 150)}...\n\n(See console for full report)`);
       console.log("FULL DISCHARGE REPORT:", report);
 
-      sessionStorage.removeItem(`${STORAGE_KEY_PREFIX}${currentPatient.id}`);
-      sessionStorage.removeItem(`${REPORT_KEY_PREFIX}${currentPatient.id}`);
-      
-      setCurrentPatient(prev => ({ ...prev, logs: [], weeklyReports: [] }));
+      // Remove from list or archive? For demo, we just reset their logs.
+      const resetPatient = {
+          ...currentPatient,
+          logs: [],
+          weeklyReports: [],
+          status: 'On Track' as const
+      };
+      updatePatientData(resetPatient);
       reset();
   };
 

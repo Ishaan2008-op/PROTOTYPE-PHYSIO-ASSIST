@@ -1,0 +1,8 @@
+{
+  "name": "PhysioAI Monitor-PHYSIO ASSIST",
+  "description": "A dual-interface physiotherapy application featuring patient motion tracking and clinician AI-assisted progress analysis.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
